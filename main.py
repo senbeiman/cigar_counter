@@ -1,3 +1,4 @@
+import collections
 import json
 import time
 
@@ -5,100 +6,143 @@ import cv2
 import numpy as np
 import requests
 
-BINARY_THRESHOLD = 100
-CIGAR_NUM = 10
-LOG_LENGTH = 5
-POST_URL = json.load(open('url.json', 'r'))["post_url"]
+Marker = collections.namedtuple('Marker', ['id', 'left_top', 'right_bottom'])
 
 
-def main():
-    # from pi camera
-    cap = cv2.VideoCapture(0)
-    count_controller = CountController()
-    timer = cv2.TickMeter()  # FPS測定用
-    timer.start()
-    while cap.isOpened():
-        ret, frame = cap.read()
-
-        # ARマーカーの検出
-        frame_color = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
-        left_marker, right_marker = detect_markers(frame_color)
-
-        # タバコのカウント
-        ret, count = count_cigars(frame_color, left_marker, right_marker)
-        if not ret:
-            continue
-        count_controller.log_count(count)
-
-        if cv2.waitKey(1) != -1:
-            break
-        time.sleep(max([0, 1-timer.getTimeSec()]))  # FPSを1にするための調整
-        timer.reset()
-        timer.start()
-    cap.release()
-    cv2.destroyAllWindows()
-
-
-class CountController:
+class Camera:
     def __init__(self):
-        self.count_log = [-1] * LOG_LENGTH
+        self.cap = cv2.VideoCapture(0)
+        self.timer = cv2.TickMeter()  # FPS調整用
+        self.timer.start()
+
+    def read_frame(self):
+        time.sleep(max([0, 1-self.timer.getTimeSec()]))  # FPSを1にするための調整
+        self.timer.reset()
+        self.timer.start()
+        ret, frame = self.cap.read()
+        rotated_frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return rotated_frame
+
+    def check_activation(self):
+        return self.cap.isOpened()
+
+    def stop(self):
+        self.cap.release()
+        cv2.destroyAllWindows()
+
+
+class TimestampPoster:
+    def __init__(self):
+        self.post_url = json.load(open('url.json', 'r'))["post_url"]
+
+    def post_timestamp(self):
+        requests.post(self.post_url,
+                      json.dumps({'timestamp': str(int(time.time()))}),
+                      headers={'Content-Type': 'application/json'})
+        print('timestamp has posted:', str(int(time.time())))
+
+
+class MarkerDetector:
+    def __init__(self):
+        self.dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
+
+    def detect_markers(self, frame):
+        corners, ids, _ = cv2.aruco.detectMarkers(frame, self.dictionary)
+        markers = []
+        if ids is not None:
+            for i, c in zip(ids, corners):
+                marker = Marker(id=i[0], left_top=tuple(c[0].astype(np.int)[0]), right_bottom=tuple(c[0].astype(np.int)[2]))
+                markers.append(marker)
+                cv2.rectangle(frame, marker.left_top, marker.right_bottom, (0, 255, 0), 1)
+        cv2.imshow('markers', frame)
+        return markers
+
+
+class CigarCounter:
+    def __init__(self, camera):
+        self.camera = camera
+        self.marker_detector = MarkerDetector()
+
+    def count(self):
+        frame = self.camera.read_frame()
+        markers = self.marker_detector.detect_markers(frame)
+        left_marker, right_marker = self.get_cigar_markers(markers)
+        ret, count = self.count_cigars(frame, left_marker, right_marker)
+        print('count', count)
+        return ret, count
+
+    @staticmethod
+    def get_cigar_markers(markers):
+        left_marker = None
+        right_marker = None
+        for m in markers:
+            if m.id == 1:
+                right_marker = m
+            elif m.id == 2:
+                left_marker = m
+        return left_marker, right_marker
+
+    @staticmethod
+    def count_cigars(frame, left_marker, right_marker, cigar_num=10, binary_threshold=100):
+        if left_marker is None or right_marker is None:
+            return False, None
+        lx1, ly1 = left_marker.left_top
+        lx2, ly2 = left_marker.right_bottom
+        rx2, ry2 = right_marker.right_bottom
+        marker_height = abs(ly2 - ly1)
+        y = int(marker_height * 2 / 3)
+        count = 0
+        frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        _, frame_binary = cv2.threshold(frame_gray, binary_threshold, 255, cv2.THRESH_BINARY)
+        frame_binary_roi = frame_binary[ly1-marker_height: ly1, lx1: rx2+1]
+        frame_binary_color_roi = cv2.cvtColor(frame_binary_roi, cv2.COLOR_GRAY2BGR)
+        for i in range(cigar_num):
+            x = int((rx2 - lx1)/127 * (5 + 13 * i))
+            cv2.drawMarker(frame_binary_color_roi, (x, y), (0, 255, 0), markerType=cv2.MARKER_CROSS, markerSize=5)
+            if frame_binary_roi[y, x] == 255:
+                count += 1
+        cv2.putText(frame_binary_color_roi, "count: {:}".format(count), (0, 5), cv2.FONT_HERSHEY_SIMPLEX, 0.3,
+                    (0, 255, 0), thickness=1)
+        cv2.imshow('roi', frame_binary_color_roi)
+        return True, count
+
+
+class DecrementDetector:
+    def __init__(self, counter, log_length=5):
+        self.counter = counter
+        self.count_log = [-1] * log_length
         self.count = 0
 
-    def log_count(self, count):
+    def judge_decrement(self):
+        ret, count = self.counter.count()
+        if not ret:
+            return False
         self.count_log = self.count_log[1:] + [count]
         if len(set(self.count_log)) == 1:
             if self.count - count == 1:
-                requests.post(POST_URL,
-                              json.dumps({'timestamp': str(int(time.time()))}),
-                              headers={'Content-Type': 'application/json'})
-                print('timestamp has posted:', str(int(time.time())))
+                self.count = count
+                return True
             self.count = count
-            print(self.count)
+        return False
 
 
-def detect_markers(frame):
-    dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
-    corners, ids, _ = cv2.aruco.detectMarkers(frame, dictionary)
-    left_marker = None
-    right_marker = None
-    if ids is not None:
-        for i, c in zip(ids, corners):
-            marker = [tuple(x) for i, x in enumerate(c[0].astype(np.int)) if i%2 == 0]
-            if i[0] == 1:
-                right_marker = marker
-            elif i[0] == 2:
-                left_marker = marker
-    if left_marker is not None:
-        cv2.rectangle(frame, left_marker[0], left_marker[1], (0, 255, 0), 1)
-    if right_marker is not None:
-        cv2.rectangle(frame, right_marker[0], right_marker[1], (0, 255, 0), 1)
-    cv2.imshow('detection', frame)
-    return left_marker, right_marker
+class CigarTimingPoster:
+    def __init__(self):
+        self.camera = Camera()
+        counter = CigarCounter(self.camera)
+        self.decrement_detector = DecrementDetector(counter)
+        self.timestamp_poster = TimestampPoster()
+        self.detect_timing()
 
-
-def count_cigars(frame_color, left_marker, right_marker):
-    if left_marker is None or right_marker is None:
-        return False, None
-    lx1, ly1 = left_marker[0]
-    lx2, ly2 = left_marker[1]
-    rx2, ry2 = right_marker[1]
-    marker_height = abs(ly2 - ly1)
-    y = int(marker_height * 2  / 3)
-    count = 0
-    frame_gray = cv2.cvtColor(frame_color, cv2.COLOR_BGR2GRAY)
-    _, frame_binary = cv2.threshold(frame_gray, BINARY_THRESHOLD, 255, cv2.THRESH_BINARY)
-    frame_binary_roi = frame_binary[ly1-marker_height: ly1, lx1: rx2+1]
-    frame_binary_color_roi = cv2.cvtColor(frame_binary_roi, cv2.COLOR_GRAY2BGR)
-    for i in range(CIGAR_NUM):
-        x = int((rx2 - lx1)/127 * (5 + 13 * i))
-        cv2.drawMarker(frame_binary_color_roi, (x, y), (0, 255, 0), markerType=cv2.MARKER_CROSS, markerSize=5)
-        if frame_binary_roi[y, x] == 255:
-            count += 1
-    cv2.putText(frame_binary_color_roi, "count: {:}".format(count), (0, 5), cv2.FONT_HERSHEY_SIMPLEX, 0.3,
-                (0, 255, 0), thickness=1)
-    cv2.imshow('roi', frame_binary_color_roi)
-    return True, count
+    def detect_timing(self):
+        while self.camera.check_activation():
+            if self.decrement_detector.judge_decrement():
+                self.timestamp_poster.post_timestamp()
+            if cv2.waitKey(1) != -1:
+                break
+        self.camera.stop()
 
 
 if __name__ == '__main__':
-    main()
+    CigarTimingPoster()
+
