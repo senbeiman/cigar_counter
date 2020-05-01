@@ -1,4 +1,5 @@
 import collections
+import datetime
 import json
 import time
 
@@ -7,6 +8,22 @@ import numpy as np
 import requests
 
 Marker = collections.namedtuple('Marker', ['id', 'left_top', 'right_bottom'])
+
+
+class SlackPoster:
+    def __init__(self):
+        self.url = "https://slack.com/api/chat.postMessage"
+        self.token = json.load(open('url.json', 'r'))["slack_token"]
+        self.channel = json.load(open('url.json', 'r'))["slack_channel"]
+
+    def post_message(self, message):
+        data = {
+            "token": self.token,
+            "channel": self.channel,
+            "text": message
+        }
+        requests.post(self.url, data=data)
+        print("message posted to slack")
 
 
 class Camera:
@@ -127,6 +144,9 @@ class DecrementDetector:
             self.count = count
         return False
 
+    def get_count(self):
+        return self.count
+
 
 class CigarTimingPoster:
     def __init__(self):
@@ -134,12 +154,22 @@ class CigarTimingPoster:
         counter = CigarCounter(self.camera)
         self.decrement_detector = DecrementDetector(counter)
         self.timestamp_poster = TimestampPoster()
+        self.slack_poster = SlackPoster()
+        self.slack_post_flag = True
+        self.checked_hour = datetime.datetime.now().hour
         self.detect_timing()
 
-    def detect_timing(self):
+    def detect_timing(self, check_hour=10):
         while self.camera.check_activation():
             if self.decrement_detector.judge_decrement():
                 self.timestamp_poster.post_timestamp()
+            now_hour = datetime.datetime.now().hour
+            if now_hour == check_hour and self.checked_hour == check_hour - 1:
+                self.slack_post_flag = True
+            self.checked_hour = now_hour
+            if self.decrement_detector.get_count() == 0 and self.slack_post_flag and now_hour == check_hour:
+                self.slack_poster.post_message("<@U9V598VFX> タバコをセットしてください")
+                self.slack_post_flag = False
             if cv2.waitKey(1) != -1:
                 break
         self.camera.stop()
