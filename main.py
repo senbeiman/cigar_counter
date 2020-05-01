@@ -46,8 +46,10 @@ class MarkerDetector:
     def __init__(self):
         self.dictionary = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
 
-    def detect_markers(self, frame):
-        corners, ids, _ = cv2.aruco.detectMarkers(frame, self.dictionary)
+    def detect_markers(self, frame, binary_threshold=100):
+        frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        _, frame_binary = cv2.threshold(frame_gray, binary_threshold, 255, cv2.THRESH_BINARY)
+        corners, ids, _ = cv2.aruco.detectMarkers(frame_binary, self.dictionary)
         markers = []
         if ids is not None:
             for i, c in zip(ids, corners):
