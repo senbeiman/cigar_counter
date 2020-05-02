@@ -1,3 +1,4 @@
+import os
 import collections
 import datetime
 import json
@@ -8,13 +9,15 @@ import numpy as np
 import requests
 
 Marker = collections.namedtuple('Marker', ['id', 'left_top', 'right_bottom'])
+PROJECT_DIR = os.path.dirname(__file__)
+JSON_PATH = os.path.join(PROJECT_DIR, 'url.json')
 
 
 class SlackPoster:
     def __init__(self):
         self.url = "https://slack.com/api/chat.postMessage"
-        self.token = json.load(open('url.json', 'r'))["slack_token"]
-        self.channel = json.load(open('url.json', 'r'))["slack_channel"]
+        self.token = json.load(open(JSON_PATH, 'r'))["slack_token"]
+        self.channel = json.load(open(JSON_PATH, 'r'))["slack_channel"]
 
     def post_message(self, message):
         data = {
@@ -50,7 +53,7 @@ class Camera:
 
 class TimestampPoster:
     def __init__(self):
-        self.post_url = json.load(open('url.json', 'r'))["post_url"]
+        self.post_url = json.load(open(JSON_PATH, 'r'))["post_url"]
 
     def post_timestamp(self):
         requests.post(self.post_url,
